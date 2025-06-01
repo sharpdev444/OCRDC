@@ -18,9 +18,6 @@ Um cliente Python para **extração de texto de imagens** usando a **Google Clou
 - 📝 **Logging detalhado**  
   Informações completas de execução para facilitar debugging e monitoramento.
 
-- 🔐 **Autenticação flexível**  
-  Suporte a múltiplos métodos de autenticação, incluindo JSON e ADC (Application Default Credentials).
-
 - ⚡ **Tratamento robusto de erros**  
   Captura e tratamento de exceções específicas da Google Vision API.
 
