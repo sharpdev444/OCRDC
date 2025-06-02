@@ -2,14 +2,15 @@ import discord
 from discord.ext import commands
 import asyncio
 import random
-import datetime
 import os
 import aiohttp
 import io
+import cv2
+import numpy as np
 from dotenv import load_dotenv
 
 try:
-    from ocr import GoogleOCR
+    from controllers.ocr import GoogleOCR
     OCR_AVAILABLE = True
 except ImportError:
     print("⚠️ GoogleOCR não disponível. Comandos de OCR serão desabilitados.")
@@ -20,10 +21,6 @@ class ApoiadorBot:
 
         env_path = "./config/.env"
         load_dotenv(dotenv_path=env_path)
-
-        print(f"Arquivo .env encontrado: {os.path.exists(env_path)}")
-        print(f"Token carregado: {'Sim' if os.getenv('DISCORD_TOKEN') else 'Não'}")
-        print(f"Primeiros caracteres do token: {os.getenv('DISCORD_TOKEN')[:10] if os.getenv('DISCORD_TOKEN') else 'None'}")
                 
         # Configurar intents
         intents = discord.Intents.default()
@@ -58,20 +55,8 @@ class ApoiadorBot:
         async def on_ready():
             print(f'{self.bot.user} está online!')
             status_text = "Digite !ajuda"
-            if self.ocr:
-                status_text += " | OCR disponível"
             await self.bot.change_presence(activity=discord.Game(name=status_text))
         
-        @self.bot.event
-        async def on_member_join(member):
-            channel = discord.utils.get(member.guild.channels, name='geral')
-            if channel:
-                embed = discord.Embed(
-                    title="Bem-vindo!",
-                    description=f"Olá {member.mention}! Bem-vindo ao servidor!",
-                    color=0x00ff00
-                )
-                await channel.send(embed=embed)
         
         @self.bot.event
         async def on_command_error(ctx, error):
@@ -106,39 +91,6 @@ class ApoiadorBot:
             )
             await ctx.send(embed=embed)
         
-        @self.bot.command(name='servidor')
-        async def server_info(ctx):
-            guild = ctx.guild
-            embed = discord.Embed(
-                title=f"Informações do {guild.name}",
-                color=0xff9900
-            )
-            embed.add_field(name="👑 Dono", value=guild.owner.mention, inline=True)
-            embed.add_field(name="👥 Membros", value=guild.member_count, inline=True)
-            embed.add_field(name="📅 Criado em", value=guild.created_at.strftime("%d/%m/%Y"), inline=True)
-            embed.add_field(name="💬 Canais de texto", value=len(guild.text_channels), inline=True)
-            embed.add_field(name="🔊 Canais de voz", value=len(guild.voice_channels), inline=True)
-            embed.add_field(name="😊 Emojis", value=len(guild.emojis), inline=True)
-            
-            if guild.icon:
-                embed.set_thumbnail(url=guild.icon.url)
-            
-            await ctx.send(embed=embed)
-        
-        @self.bot.command(name='dado')
-        async def roll_dice(ctx, sides: int = 6):
-            if sides < 2:
-                await ctx.send("O dado precisa ter pelo menos 2 lados!")
-                return
-            
-            result = random.randint(1, sides)
-            embed = discord.Embed(
-                title="🎲 Rolagem de Dado",
-                description=f"Você rolou um dado de {sides} lados e tirou: **{result}**",
-                color=0xff0000
-            )
-            await ctx.send(embed=embed)
-        
         @self.bot.command(name='moeda')
         async def flip_coin(ctx):
             result = random.choice(['Cara', 'Coroa'])
@@ -150,19 +102,6 @@ class ApoiadorBot:
                 color=0xffd700
             )
             await ctx.send(embed=embed)
-        
-        @self.bot.command(name='enquete')
-        async def poll(ctx, *, question):
-            embed = discord.Embed(
-                title="📊 Enquete",
-                description=question,
-                color=0x9932cc
-            )
-            embed.set_footer(text=f"Enquete criada por {ctx.author.display_name}")
-            
-            msg = await ctx.send(embed=embed)
-            await msg.add_reaction('✅')
-            await msg.add_reaction('❌')
         
         @self.bot.command(name='limpar')
         @commands.has_permissions(manage_messages=True)
@@ -193,21 +132,158 @@ class ApoiadorBot:
             )
             embed.set_image(url=member.avatar.url if member.avatar else member.default_avatar.url)
             await ctx.send(embed=embed)
-        
-        @self.bot.command(name='tempo')
-        async def current_time(ctx):
-            now = datetime.datetime.now()
-            embed = discord.Embed(
-                title="🕐 Horário Atual",
-                description=now.strftime("**Data:** %d/%m/%Y\n**Horário:** %H:%M:%S"),
-                color=0x4169e1
-            )
-            await ctx.send(embed=embed)
+
     
     def setup_ocr_commands(self):
         """Configura comandos relacionados ao OCR"""
         
         @self.bot.command(name='ocr')
+        async def ocr_command(ctx):
+            """Extrai texto de uma imagem anexada ou URL"""
+            if not self.ocr:
+                embed = discord.Embed(
+                    title=" ❌ Serviço de OCR Indisponivel",
+                    description="Serviço em Manutenção Temporaria",
+                    color=0xff0000
+                )
+                await ctx.send(embed=embed)
+                return
+            
+            # Verificar se há anexos na mensagem
+            if ctx.message.attachments:
+                attachment = ctx.message.attachments[0]
+                
+                # Verificar se é uma imagem
+                if not any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']):
+                    embed = discord.Embed(
+                        title="❌ Formato Inválido",
+                        description="Por favor, envie uma imagem válida (PNG, JPG, JPEG, GIF, BMP, WEBP).",
+                        color=0xff0000
+                    )
+                    await ctx.send(embed=embed)
+                    return
+                
+                # Mostrar que está processando
+                processing_embed = discord.Embed(
+                    title="🔄 Processando...",
+                    color=0xffff00
+                )
+                processing_msg = await ctx.send(embed=processing_embed)
+                
+                try:
+                    # Baixar a imagem
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(attachment.url) as resp:
+                            if resp.status == 200:
+                                image_data = await resp.read()
+                            else:
+                                raise Exception("Erro ao baixar a imagem")
+                            
+                    #Processar Imagem pra diminuir o tempo
+                    def preprocess_image(image_bytes):
+                        # Convert bytes to numpy array
+                        nparr = np.frombuffer(image_bytes, np.uint8)
+                        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+                        # Convert to grayscale
+                        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+                        # Sharpen the image
+                        blurred = cv2.GaussianBlur(gray, (0, 0), 3)
+                        sharpened = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
+
+                        # Adaptive threshold for better text separation
+                        thresh = cv2.adaptiveThreshold(
+                            sharpened, 255,
+                            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                            cv2.THRESH_BINARY,
+                            11, 2
+                        )
+
+                        # Resize if necessary
+                        max_height = 1024
+                        height, width = thresh.shape
+                        if height > max_height:
+                            scale = max_height / height
+                            thresh = cv2.resize(thresh, (int(width * scale), max_height))
+
+                        # Encode to bytes
+                        is_success, buffer = cv2.imencode(".jpg", thresh)
+                        if is_success:
+                            return buffer.tobytes()
+                    
+                    image_data = preprocess_image(image_data)
+                    
+                    # Processar OCR
+                    texts = self.ocr.perform_ocr(image_data)
+                    
+                    if texts and len(texts) > 0:
+                        extracted_text = texts[0].description
+                        
+                        # Limitar tamanho do texto para Discord
+                        if len(extracted_text) > 1900:
+                            extracted_text = extracted_text[:1900] + "..."
+                        
+                        embed = discord.Embed(
+                            title="📝 Texto Extraído",
+                            description=f"```\n{extracted_text}\n```",
+                            color=0x00ff00
+                        )
+                        embed.add_field(
+                            name="📊 Estatísticas",
+                            value=f"**Caracteres:** {len(texts[0].description)}\n**Palavras:** {len(texts[0].description.split())}\n**Elementos detectados:** {len(texts)}",
+                            inline=False
+                        )
+                        embed.set_footer(text=f"Solicitado por {ctx.author.display_name}")
+                        
+                        await processing_msg.edit(embed=embed)
+                        
+                        # Se o texto for muito longo, enviar como arquivo
+                        if len(texts[0].description) > 1900:
+                            text_file = io.StringIO(texts[0].description)
+                            file = discord.File(text_file, filename="texto_extraido.txt")
+                            await ctx.send("📎 Texto completo:", file=file)
+                    
+                    else:
+                        embed = discord.Embed(
+                            title="❌ Nenhum Texto Encontrado",
+                            description="Não foi possível detectar texto na imagem.",
+                            color=0xff9900
+                        )
+                        await processing_msg.edit(embed=embed)
+                
+                except Exception as e:
+                    embed = discord.Embed(
+                        title="❌ Erro no Processamento",
+                        description=f"Ocorreu um erro ao processar a imagem: {str(e)}",
+                        color=0xff0000
+                    )
+                    await processing_msg.edit(embed=embed)
+            
+            else:
+                embed = discord.Embed(
+                    title="📷 Como usar o OCR",
+                    description="Para extrair texto de uma imagem:",
+                    color=0x0099ff
+                )
+                embed.add_field(
+                    name="📤 Anexar Imagem",
+                    value="Envie o comando `!ocr` junto com uma imagem anexada",
+                    inline=False
+                )
+                embed.add_field(
+                    name="🔗 URL da Imagem",
+                    value="Use `!ocr_url <link_da_imagem>`",
+                    inline=False
+                )
+                embed.add_field(
+                    name="📋 Formatos Suportados",
+                    value="PNG, JPG, JPEG, GIF, BMP, WEBP",
+                    inline=False
+                )
+                await ctx.send(embed=embed)
+
+        @self.bot.command(name='ocr_quality')
         async def ocr_command(ctx):
             """Extrai texto de uma imagem anexada ou URL"""
             if not self.ocr:
@@ -396,6 +472,182 @@ class ApoiadorBot:
                 )
                 await processing_msg.edit(embed=embed)
         
+        @self.bot.command(name='apoiador')
+        async def apoiador_command(ctx):
+            """Check if in the image there is an instance of 'codigo de apoiador' and their respective code"""
+
+            if not self.ocr:
+                embed = discord.Embed(
+                    title="❌ Serviço de Apoiador Automático Indisponível",
+                    description="Serviço em Manutenção Temporária",
+                    color=0xff0000
+                )
+                await ctx.send(embed=embed)
+                return
+            
+            # Verificar se há anexos na mensagem
+            if ctx.message.attachments:
+                attachment = ctx.message.attachments[0]
+                
+                # Verificar se é uma imagem
+                if not any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']):
+                    embed = discord.Embed(
+                        title="❌ Formato Inválido",
+                        description="Por favor, envie uma imagem válida (PNG, JPG, JPEG, GIF, BMP, WEBP).",
+                        color=0xff0000
+                    )
+                    await ctx.send(embed=embed)
+                    return
+                
+                # Mostrar que está processando
+                processing_embed = discord.Embed(
+                    title="🔄 Processando...",
+                    description="Analisando a imagem em busca do código de apoiador...",
+                    color=0xffff00
+                )
+                processing_msg = await ctx.send(embed=processing_embed)
+                
+                try:
+                    # Baixar a imagem
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(attachment.url) as resp:
+                            if resp.status == 200:
+                                image_data = await resp.read()
+                            else:
+                                raise Exception("Erro ao baixar a imagem")
+                            
+                    #Processar Imagem pra diminuir o tempo
+                    def preprocess_image(image_bytes):
+                        # Convert bytes to numpy array
+                        nparr = np.frombuffer(image_bytes, np.uint8)
+                        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+                        # Convert to grayscale
+                        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+                        # Sharpen the image
+                        blurred = cv2.GaussianBlur(gray, (0, 0), 3)
+                        sharpened = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
+
+                        # Adaptive threshold for better text separation
+                        thresh = cv2.adaptiveThreshold(
+                            sharpened, 255,
+                            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                            cv2.THRESH_BINARY,
+                            11, 2
+                        )
+
+                        # Resize if necessary
+                        max_height = 1024
+                        height, width = thresh.shape
+                        if height > max_height:
+                            scale = max_height / height
+                            thresh = cv2.resize(thresh, (int(width * scale), max_height))
+
+                        # Encode to bytes
+                        is_success, buffer = cv2.imencode(".jpg", thresh)
+                        if is_success:
+                            return buffer.tobytes()
+                    
+                    image_data = preprocess_image(image_data)
+                    # Processar OCR
+                    texts = self.ocr.perform_ocr(image_data)
+                    
+                    if texts and len(texts) > 0:
+                        extracted_text = texts[0].description.lower()  # Converter para minúsculas para busca
+                        
+                        # Definir os códigos e textos a procurar
+
+                        target_code = 'Vascurado'
+                        target_phrases = [f"APOIE-UM-CRIADOR: {target_code}",f"Support-a-Creator: {target_code}",f"SUPPORT-A-CREATOR: {target_code}"]
+
+                        flag = False
+                        for phrase in target_phrases:
+                            if phrase.lower() in extracted_text or target_code.lower in extracted_text:
+                                flag = True
+                                break
+                        if flag:
+                            # Sucesso - encontrou ambos
+                            success_embed = discord.Embed(
+                                title="✅ Código de Apoiador Encontrado!",
+                                description=f"**Código detectado:** {target_code.upper()}",
+                                color=0x32CD32
+                            )
+                            success_embed.add_field(
+                                name="📋 Status", 
+                                value="Código de apoiador válido confirmado!", 
+                                inline=False
+                            )
+                            success_embed.set_footer(text=f"Verificado por {ctx.author.display_name}")
+                            await processing_msg.edit(embed=success_embed)
+                            
+                            
+                        else:
+                            # Não encontrou "codigo de apoiador"
+                            not_found_embed = discord.Embed(
+                                title="❌ Código de Apoiador Não Encontrado",
+                                description="Não foi possível encontrar o Código de Apoiador na imagem",
+                                color=0xff0000
+                            )
+                            not_found_embed.add_field(
+                                name="💡 Dica", 
+                                value="Certifique-se de que a imagem contém o texto 'Código de Apoiador' de forma legível.", 
+                                inline=False
+                            )
+                            await processing_msg.edit(embed=not_found_embed)
+                    
+                    else:
+                        # Nenhum texto foi detectado
+                        no_text_embed = discord.Embed(
+                            title="❌ Nenhum Texto Detectado",
+                            description="Não foi possível detectar texto na imagem.",
+                            color=0xff0000
+                        )
+                        no_text_embed.add_field(
+                            name="💡 Sugestões",
+                            value="• Verifique se a imagem está nítida\n• Certifique-se de que há texto visível\n• Tente uma imagem com melhor qualidade",
+                            inline=False
+                        )
+                        await processing_msg.edit(embed=no_text_embed)
+                        
+                except Exception as e:
+                    error_embed = discord.Embed(
+                        title="❌ Erro no Processamento",
+                        description=f"Ocorreu um erro ao processar a imagem.",
+                        color=0xff0000
+                    )
+                    error_embed.add_field(
+                        name="🔧 Detalhes do Erro", 
+                        value=f"```{str(e)}```", 
+                        inline=False
+                    )
+                    await processing_msg.edit(embed=error_embed)
+                    print(f"Erro no comando apoiador: {e}")  # Log para debug
+                    
+            else:
+                embed = discord.Embed(
+                    title="📷 Como usar o comando Apoiador",
+                    description="Este comando verifica se há um código de apoiador válido na imagem.",
+                    color=0x0099ff
+                )
+                embed.add_field(
+                    name="📤 Anexar Imagem",
+                    value="Envie o comando `!apoiador` junto com a foto anexada",
+                    inline=False
+                )
+                embed.add_field(
+                    name="🎯 O que procura",
+                    value="• Texto 'Código de Apoiador'\n• Código específico: 'Vascurado'",
+                    inline=False
+                )
+                embed.add_field(
+                    name="📋 Formatos Suportados",
+                    value="PNG, JPG, JPEG, GIF, BMP, WEBP",
+                    inline=False
+                )
+                await ctx.send(embed=embed)
+                            
+        
         @self.bot.command(name='ocr_status')
         async def ocr_status(ctx):
             """Mostra o status do serviço OCR"""
@@ -428,10 +680,6 @@ class ApoiadorBot:
             # Comandos básicos
             basic_commands = [
                 ("!ping", "Mostra a latência do bot"),
-                ("!servidor", "Informações do servidor"),
-                ("!dado [lados]", "Rola um dado (padrão: 6 lados)"),
-                ("!moeda", "Cara ou coroa"),
-                ("!enquete <pergunta>", "Cria uma enquete"),
                 ("!limpar [quantidade]", "Limpa mensagens (mod only)"),
                 ("!avatar [@usuário]", "Mostra o avatar"),
                 ("!tempo", "Horário atual")

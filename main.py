@@ -1,5 +1,5 @@
-from ocr import GoogleOCR
-from bot import ApoiadorBot
+from controllers.ocr import GoogleOCR
+from controllers.bot import ApoiadorBot
 
 if __name__ == "__main__":
     credentials_path = r"googleAPI_key.json"
